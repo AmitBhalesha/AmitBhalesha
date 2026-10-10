@@ -125,6 +125,8 @@ select, input[type="text"], input:not([type]), input[type="password"] {
 .badge { font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: var(--surface-2); color: var(--text-2); }
 .user { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--text-2); }
 .user #user-name { color: var(--text); font-weight: 600; }
+.view-as { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.view-as select { padding: 4px 8px; }
 .role { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
 .scope-note { padding: 8px 16px; background: var(--surface-2); color: var(--text-2); font-size: 13px; border-bottom: 1px solid var(--hairline); }
 

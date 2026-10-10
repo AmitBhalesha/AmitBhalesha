@@ -111,6 +111,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("path")
     p = sub.add_parser("purge", help="delete location history older than the retention period")
     p.add_argument("--days", type=int, default=settings.retention_days)
+    p = sub.add_parser("export-demo", help="write a static demo page + precomputed data to a folder")
+    p.add_argument("out_dir")
     p = sub.add_parser("serve", help="run the web app")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
@@ -144,6 +146,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Imported {import_beats(conn, args.path)} beats")
     elif args.cmd == "purge":
         print(f"Deleted {purge(conn, args.days):,} pings older than {args.days} days")
+    elif args.cmd == "export-demo":
+        from .export_demo import export_demo
+        result = export_demo(conn, args.out_dir, settings.agency_name, settings.timezone)
+        print(f"Wrote {result['page']} and {len(result['files'])} data files ({result['bytes'] / 1e6:.1f} MB)")
     elif args.cmd == "serve":
         import os
 

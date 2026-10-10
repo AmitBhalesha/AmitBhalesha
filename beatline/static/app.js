@@ -3,6 +3,8 @@
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const MAX_GAP_S = 300;
+// Set by demo-shim.js on the static demo page: no sign-in, a role switcher instead.
+const DEMO = Boolean(window.BEATLINE_DEMO);
 
 const state = {
   config: null,
@@ -109,6 +111,15 @@ $("#login-form").addEventListener("submit", async (e) => {
   }
 });
 
+async function demoLogin(username) {
+  const { user } = await api("/api/login", { method: "POST", body: JSON.stringify({ username, password: "" }) });
+  stopPlayback();
+  state.selectedOfficer = null;
+  await start(user);
+}
+
+$("#view-as-select").addEventListener("change", (e) => demoLogin(e.target.value));
+
 $("#logout").addEventListener("click", async () => {
   try { await api("/api/logout", { method: "POST" }); } catch { /* already gone */ }
   state.user = null;
@@ -125,6 +136,7 @@ async function boot() {
   fmtDayTime = new Intl.DateTimeFormat(undefined, {
     timeZone: tz, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
   });
+  if (DEMO) return demoLogin("sergeant");
   try {
     await start(await api("/api/me"));
   } catch {
@@ -140,6 +152,9 @@ async function start(user) {
   $("#demo-badge").hidden = !state.config.demo;
   $("#user-name").textContent = user.display_name;
   $("#user-role").textContent = user.role;
+  $("#view-as").hidden = !DEMO;
+  $("#logout").hidden = DEMO;
+  if (DEMO) $("#view-as-select").value = user.username;
 
   const auditOnly = user.role === "auditor";
   $("#app").classList.toggle("audit-only", auditOnly);
@@ -412,7 +427,7 @@ async function loadAudit() {
 
 function initMap() {
   if (map) {
-    map.invalidateSize();
+    setTimeout(() => map.invalidateSize(), 0);
     return;
   }
   map = L.map("map", { zoomControl: true, attributionControl: true });
@@ -446,6 +461,7 @@ function initMap() {
 function setTiles() {
   if (tileLayer) tileLayer.remove();
   const c = state.config;
+  if (!c.tile_url) return;
   tileLayer = L.tileLayer(isDark() ? c.tile_url_dark : c.tile_url, {
     attribution: c.tile_attribution, subdomains: "abcd", maxZoom: 20,
   }).addTo(map);

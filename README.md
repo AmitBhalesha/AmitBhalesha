@@ -41,6 +41,17 @@ Sign in as `sergeant`, `officer`, `auditor` or `admin`. The password for all fou
 The demo city, officers and calls are all synthetic. Night shift is deliberately short-staffed, so
 the coverage gaps and missed hot-spot targets show up in the dashboard.
 
+## Shareable static demo
+
+```bash
+python -m beatline export-demo demo-site/
+```
+
+This writes a single page plus precomputed JSON for every shift. You can host it on any static host or
+publish it as a Claude artifact. Sign-in is replaced by a "View as" switcher (sergeant, officer,
+auditor), and the audit log records that viewer's clicks in memory. There is no street map, because
+static hosts can't load map tiles.
+
 ## Using real agency data
 
 ```bash

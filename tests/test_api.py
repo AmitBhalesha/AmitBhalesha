@@ -141,3 +141,19 @@ def test_demo_seed_end_to_end(tmp_path):
     for o in report["officers"]:
         assert 0 < o["tracked_minutes"] <= 480
         assert o["pct_in_assigned"] is None or 0 <= o["pct_in_assigned"] <= 100
+
+
+def test_export_demo_writes_page_and_data(conn, tmp_path):
+    import json
+
+    from beatline.export_demo import export_demo
+
+    auth.create_user(conn, "officer", "password123", "officer", officer_id="101")
+    result = export_demo(conn, str(tmp_path / "demo"), "Test PD", "America/Denver")
+    page = (tmp_path / "demo" / "index.html").read_text()
+    assert "<html" not in page and "<body" not in page and "BEATLINE_DEMO" in page
+    meta = json.loads((tmp_path / "demo" / "data" / "meta.json").read_text())
+    assert meta["config"]["tile_url"] is None and meta["officer_shifts"]
+    shift = json.loads((tmp_path / "demo" / result["files"][1]).read_text())
+    assert [o["officer_id"] for o in shift["officer_report"]["officers"]] == ["101"]
+    assert set(shift["trails"]) == {"101", "102"}
