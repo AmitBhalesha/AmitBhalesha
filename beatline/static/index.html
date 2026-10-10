@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Beatline</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23256abf'/%3E%3Cpath d='M7 22 L13 12 L19 18 L25 9' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <section id="login" class="login" hidden>
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>Beatline</div>
+      <p class="muted" id="login-agency"></p>
+      <label>Username <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button type="submit">Sign in</button>
+      <p class="error" id="login-error" role="alert"></p>
+      <div class="demo-hint" id="demo-hint" hidden>
+        <strong>Demo data.</strong> Sign in as <code>sergeant</code>, <code>officer</code>,
+        <code>auditor</code> or <code>admin</code>, password <code>beatline-demo</code>.
+      </div>
+      <p class="fineprint">Access to this system is logged. Every view of officer location history is recorded in the audit log.</p>
+    </form>
+  </section>
+
+  <div id="app" class="app" hidden>
+    <header class="topbar">
+      <div class="brand"><span class="logo" aria-hidden="true"></span>Beatline <span class="agency" id="agency"></span></div>
+      <label class="shift-picker" id="shift-picker">
+        <span class="sr-only">Shift</span>
+        <button type="button" class="ghost" id="prev-shift" aria-label="Previous shift">&#8249;</button>
+        <select id="shift-select"></select>
+        <button type="button" class="ghost" id="next-shift" aria-label="Next shift">&#8250;</button>
+      </label>
+      <span class="badge demo" id="demo-badge" hidden>Synthetic demo data</span>
+      <div class="user">
+        <span id="user-name"></span> <span class="role" id="user-role"></span>
+        <button type="button" class="ghost" id="logout">Sign out</button>
+      </div>
+    </header>
+
+    <div class="scope-note" id="scope-note" hidden></div>
+
+    <main class="layout">
+      <aside class="panel" id="panel">
+        <section class="tiles" id="tiles" aria-label="Shift summary"></section>
+        <nav class="tabs" role="tablist" id="tabs">
+          <button role="tab" data-tab="units" aria-selected="true">Units</button>
+          <button role="tab" data-tab="beats">Beats</button>
+          <button role="tab" data-tab="zones">Hot spots</button>
+          <button role="tab" data-tab="calls">Calls</button>
+          <button role="tab" data-tab="audit" hidden>Audit log</button>
+        </nav>
+        <div class="tab-body" id="tab-units" role="tabpanel"></div>
+        <div class="tab-body" id="tab-beats" role="tabpanel" hidden></div>
+        <div class="tab-body" id="tab-zones" role="tabpanel" hidden></div>
+        <div class="tab-body" id="tab-calls" role="tabpanel" hidden></div>
+        <div class="tab-body" id="tab-audit" role="tabpanel" hidden></div>
+      </aside>
+
+      <section class="map-wrap" id="map-wrap">
+        <div id="map" aria-label="Map of beats, patrol trails and calls"></div>
+        <details class="layers card" id="layers" open>
+          <summary class="layers-title">Layers</summary>
+          <label><input type="checkbox" data-layer="beats" checked> Beat coverage</label>
+          <label><input type="checkbox" data-layer="trails" checked> Patrol trails</label>
+          <label><input type="checkbox" data-layer="calls" checked> Calls for service</label>
+          <label><input type="checkbox" data-layer="zones" checked> Hot spots</label>
+          <div class="layers-title">Heat map</div>
+          <label><input type="radio" name="heat" value="" checked> Off</label>
+          <label><input type="radio" name="heat" value="patrol"> Patrol presence (shift)</label>
+          <label><input type="radio" name="heat" value="calls"> Call demand (28 days)</label>
+          <div class="legend" id="legend"></div>
+        </details>
+        <div class="playback card" id="playback">
+          <button type="button" id="play" aria-label="Play">&#9654;</button>
+          <input type="range" id="scrub" min="0" max="1000" value="0" aria-label="Shift time">
+          <span class="clock" id="clock">--:--</span>
+          <select id="speed" aria-label="Playback speed">
+            <option value="60">1 min/s</option>
+            <option value="300" selected>5 min/s</option>
+            <option value="900">15 min/s</option>
+          </select>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/vendor/leaflet/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

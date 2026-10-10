@@ -1,0 +1,30 @@
+[project]
+name = "beatline"
+version = "0.1.0"
+description = "Patrol coverage analytics for police supervisors"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx>=0.27"]
+
+[project.scripts]
+beatline = "beatline.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["beatline*"]
+
+[tool.setuptools.package-data]
+beatline = ["static/*", "static/vendor/leaflet/*", "static/vendor/leaflet/images/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning:starlette.*", "ignore:Using `httpx`"]
