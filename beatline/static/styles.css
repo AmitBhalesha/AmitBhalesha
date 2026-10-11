@@ -154,6 +154,7 @@ select, input[type="text"], input:not([type]), input[type="password"] {
 }
 .tabs button[aria-selected="true"] { color: var(--text); border-bottom-color: var(--accent); }
 .tab-intro { font-size: 13px; color: var(--text-2); margin: 4px 0 10px; }
+.subhead { font-size: 13px; margin: 20px 0 2px; }
 
 /* Tables */
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
@@ -175,7 +176,9 @@ tbody tr.selected { background: color-mix(in srgb, var(--accent) 12%, transparen
 .status .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; }
 .status.under .dot, .status.uncovered .dot { background: var(--div-under); }
 .status.balanced .dot, .status.low_demand .dot { background: var(--div-mid); }
-.status.over .dot { background: var(--div-over); }
+.status.over .dot, .status.quieter .dot { background: var(--div-over); }
+.status.busier .dot { background: var(--div-under); }
+.status.typical .dot { background: var(--div-mid); }
 .flag { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; font-weight: 600; color: var(--critical-text); }
 .flag.ok { color: var(--good-text); }
 

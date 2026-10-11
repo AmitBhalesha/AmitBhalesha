@@ -41,6 +41,52 @@ Sign in as `sergeant`, `officer`, `auditor` or `admin`. The password for all fou
 The demo city, officers and calls are all synthetic. Night shift is deliberately short-staffed, so
 the coverage gaps and missed hot-spot targets show up in the dashboard.
 
+## Houston live (public data)
+
+Beatline can run on Houston's public data. It doesn't need an agency partnership:
+
+| Data | Source | Command |
+|---|---|---|
+| HPD beat boundaries | City of Houston GIS, `HoustonMap/Public_Safety` map service, "Houston Police Beats" layer (public domain) | `houston setup` |
+| Live police calls | HEC Active Incidents page, which the city regenerates every 5 minutes from its dispatch system | `houston poll` |
+| Usual demand per beat | HPD's monthly crime spreadsheet (NIBRS, by street and beat) | `houston import-crime FILE` |
+
+```bash
+pip install -e ".[houston]"
+export BEATLINE_DB=houston.db
+python -m beatline houston check        # tests each source once and prints what it found
+python -m beatline houston setup        # loads the real HPD beats
+python -m beatline houston import-crime NIBRSPublicView.xlsx   # from HPD's Monthly Crime Data page
+python -m beatline create-user sgt --role sergeant
+python -m beatline houston poll &       # leave running; records calls every 5 minutes
+python -m beatline serve
+```
+
+Download the crime spreadsheet from HPD's
+[Monthly Crime Data by Street and Police Beat](https://www.houstontx.gov/police/cs/Monthly_Crime_Data_by_Street_and_Police_Beat.htm)
+page. Columns are matched by name, so both the current NIBRS layout and the older layout
+(`Date, Hour, Offense Type, Beat, ...`) import.
+
+Officer locations are not public, so the dashboard runs in **calls-only mode**:
+- Each beat's calls this shift are compared with its usual share of the crime baseline (the latest 90
+  days on file). A beat is flagged *busier* or *quieter* than usual only when the difference is too
+  large to be chance.
+- The current shift is marked live and refreshes every minute.
+- Calls whose address can't be geocoded are listed separately, not dropped.
+
+Limits of the public sources:
+- **No coordinates or priority.** Active Incidents publishes neither. Addresses are geocoded with the
+  free US Census geocoder and cached, and priority is shown as unknown.
+- **Partial history.** Only calls listed while the poller is running are captured. History starts the
+  first time you run `houston poll`.
+- **Possibly incomplete.** The page may not list every call.
+- **Layout changes.** If the city changes the page layout, `houston check` shows what the parser sees.
+- **Baseline lag.** The crime file lags 1–2 weeks after each month ends, and HPD notes that its
+  figures can change.
+
+With an agency's AVL feed connected (`/api/ingest/pings` plus shift assignments), the same Houston
+beats switch to the full patrol-coverage view.
+
 ## Shareable static demo
 
 ```bash

@@ -60,10 +60,14 @@ class Area:
 
 
 class BeatIndex:
-    """Answers "which beat is this point in?" for a handful of polygons."""
+    """Answers "which beat is this point in?". Values are one ring or a list of
+    rings (multi-part beats); a few hundred beats is fine with a bbox pre-check."""
 
-    def __init__(self, beats: dict[str, list[list[float]]]):
-        self.areas = [Area.from_ring(beat_id, ring) for beat_id, ring in beats.items()]
+    def __init__(self, beats: dict[str, list]):
+        self.areas = []
+        for beat_id, polygon in beats.items():
+            rings = [polygon] if polygon and isinstance(polygon[0][0], (int, float)) else polygon
+            self.areas += [Area.from_ring(beat_id, ring) for ring in rings]
 
     def locate(self, lat: float, lon: float) -> str | None:
         for area in self.areas:

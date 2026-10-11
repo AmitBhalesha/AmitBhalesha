@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from . import audit, auth, db
+from . import audit, auth, db, importers
 from .config import Settings
 
 
@@ -61,24 +61,9 @@ def import_calls(conn, path: str, tz: ZoneInfo) -> int:
 
 def import_beats(conn, path: str) -> int:
     """GeoJSON FeatureCollection of Polygon/MultiPolygon features with an `id` or `beat`
-    property and an optional `name`. MultiPolygons keep their largest ring."""
+    property and an optional `name`."""
     with open(path) as f:
-        fc = json.load(f)
-    count = 0
-    for feat in fc["features"]:
-        props = feat.get("properties") or {}
-        beat_id = str(props.get("id") or props.get("beat") or feat.get("id"))
-        geom = feat["geometry"]
-        if geom["type"] == "Polygon":
-            ring = geom["coordinates"][0]
-        elif geom["type"] == "MultiPolygon":
-            ring = max((poly[0] for poly in geom["coordinates"]), key=len)
-        else:
-            continue
-        db.upsert_beat(conn, beat_id, str(props.get("name") or f"Beat {beat_id}"), [[p[0], p[1]] for p in ring])
-        count += 1
-    conn.commit()
-    return count
+        return importers.import_beats_geojson(conn, json.load(f))
 
 
 def purge(conn, days: int) -> int:
@@ -111,6 +96,16 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("path")
     p = sub.add_parser("purge", help="delete location history older than the retention period")
     p.add_argument("--days", type=int, default=settings.retention_days)
+    hou = sub.add_parser("houston", help="Houston, TX public data: beats, live calls, crime baseline")
+    hsub = hou.add_subparsers(dest="houston_cmd", required=True)
+    p = hsub.add_parser("setup", help="load real HPD beats from the city GIS and configure for Houston")
+    p.add_argument("--layer", type=int, help="GIS layer id (default: found by name, else 5)")
+    p = hsub.add_parser("poll", help="record live police calls from HEC Active Incidents")
+    p.add_argument("--every", type=int, default=300, help="seconds between polls (min 60, default 300)")
+    p.add_argument("--once", action="store_true", help="poll once and exit (for cron)")
+    p = hsub.add_parser("import-crime", help="load an HPD monthly crime spreadsheet (.xlsx/.csv) as the baseline")
+    p.add_argument("path")
+    hsub.add_parser("check", help="test every live source once and print what was found")
     p = sub.add_parser("export-demo", help="write a static demo page + precomputed data to a folder")
     p.add_argument("out_dir")
     p = sub.add_parser("serve", help="run the web app")
@@ -146,6 +141,25 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Imported {import_beats(conn, args.path)} beats")
     elif args.cmd == "purge":
         print(f"Deleted {purge(conn, args.days):,} pings older than {args.days} days")
+    elif args.cmd == "houston":
+        from . import houston
+        if args.houston_cmd == "setup":
+            result = houston.setup(conn, layer=args.layer)
+            print(f"Loaded {result['beats']} HPD beats. Beat layer fields: {', '.join(result['fields'])}")
+            print("Next: `python -m beatline houston poll` (leave running), then import a monthly crime file.")
+        elif args.houston_cmd == "poll":
+            if args.once:
+                print(json.dumps(houston.poll_once(conn)))
+            else:
+                print(f"Polling Active Incidents every {max(args.every, 60)}s. Ctrl+C to stop.", flush=True)
+                houston.poll_forever(conn, args.every)
+        elif args.houston_cmd == "import-crime":
+            stats = houston.import_crime(conn, args.path)
+            print(f"Imported {stats['imported']:,} of {stats['rows']:,} rows ({stats['first']} to {stats['last']}); "
+                  f"{stats['beats_matched']:,} matched a beat, {stats['with_coordinates']:,} had coordinates, "
+                  f"{stats['skipped']:,} skipped")
+        elif args.houston_cmd == "check":
+            houston.check(conn)
     elif args.cmd == "export-demo":
         from .export_demo import export_demo
         result = export_demo(conn, args.out_dir, settings.agency_name, settings.timezone)

@@ -149,14 +149,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/config")
     def config(conn=Depends(get_conn)):
-        beats = db.load_beats(conn)
-        lats = [p[1] for b in beats.values() for p in b["ring"]]
-        lons = [p[0] for b in beats.values() for p in b["ring"]]
         return {
-            "agency_name": settings.agency_name,
+            "agency_name": db.get_meta(conn, "agency_name", settings.agency_name),
             "timezone": db.get_meta(conn, "timezone", settings.timezone),
             "demo": db.get_meta(conn, "demo") == "1",
-            "bounds": [[min(lats), min(lons)], [max(lats), max(lons)]] if beats else None,
+            "data_note": db.get_meta(conn, "data_note"),
+            "bounds": db.beats_bounds(db.load_beats(conn)),
             "tile_url": settings.tile_url,
             "tile_url_dark": settings.tile_url_dark,
             "tile_attribution": settings.tile_attribution,
@@ -184,6 +182,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             params.append(user["officer_id"])
         sql += " GROUP BY shift_start, shift_end, shift_name ORDER BY shift_start DESC LIMIT ?"
         rows = conn.execute(sql, params + [limit]).fetchall()
+        if not rows and not conn.execute("SELECT 1 FROM assignments LIMIT 1").fetchone():
+            # No rosters at all (public data): offer shift-shaped windows over the recorded calls.
+            tz = db.get_meta(conn, "timezone", settings.timezone)
+            return analytics.call_windows(conn, tz, int(time.time()), limit)
         return [
             {"name": r["shift_name"], "start": r["shift_start"], "end": r["shift_end"], "units": r["units"]}
             for r in rows

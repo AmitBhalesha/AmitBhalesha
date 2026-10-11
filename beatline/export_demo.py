@@ -59,9 +59,8 @@ def export_demo(conn: sqlite3.Connection, out_dir: str, agency_name: str, defaul
     officer = next((u for u in users.values() if u["role"] == "officer"), None)
     officer_id = officer["officer_id"] if officer else None
 
-    beats = list(db.load_beats(conn).values())
-    lats = [p[1] for b in beats for p in b["ring"]]
-    lons = [p[0] for b in beats for p in b["ring"]]
+    beats_by_id = db.load_beats(conn)
+    beats = list(beats_by_id.values())
     shifts = _shift_list(conn.execute(
         "SELECT shift_name, shift_start, shift_end, COUNT(*) AS units FROM assignments "
         "GROUP BY shift_start, shift_end, shift_name ORDER BY shift_start DESC"
@@ -75,7 +74,7 @@ def export_demo(conn: sqlite3.Connection, out_dir: str, agency_name: str, defaul
             "agency_name": agency_name,
             "timezone": db.get_meta(conn, "timezone", default_tz),
             "demo": True,
-            "bounds": [[min(lats), min(lons)], [max(lats), max(lons)]] if beats else None,
+            "bounds": db.beats_bounds(beats_by_id),
             "tile_url": None,
             "tile_url_dark": None,
             "tile_attribution": "",

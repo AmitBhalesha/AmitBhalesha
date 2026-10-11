@@ -22,7 +22,7 @@ const state = {
   timer: null,
 };
 
-let map, renderers, groups, tileLayer, fmtTime, fmtDay, fmtDayTime;
+let map, renderers, groups, tileLayer, fmtTime, fmtDay, fmtDate, fmtDayTime, refreshTimer;
 
 /* ---------- helpers ---------- */
 
@@ -79,6 +79,17 @@ async function api(path, opts = {}) {
   return res.json();
 }
 
+// No GPS in this window (public data only): compare calls with the baseline instead of patrol time.
+function callsOnly() {
+  return state.report?.mode === "calls_only";
+}
+
+function demandLabel(d) {
+  if (!d) return "the baseline";
+  if (d.source === "crime") return `reported crimes, ${fmtDate.format(new Date(d.start * 1000))} to ${fmtDate.format(new Date((d.end - 1) * 1000))}`;
+  return "calls in the 28 days before this shift";
+}
+
 function officerLabel(officerId) {
   const o = state.report?.officers.find((x) => x.officer_id === officerId);
   return o ? o.call_sign : officerId;
@@ -88,6 +99,7 @@ function officerLabel(officerId) {
 
 function showLogin() {
   stopPlayback();
+  clearInterval(refreshTimer);
   $("#app").hidden = true;
   $("#login").hidden = false;
   $("#login-agency").textContent = state.config?.agency_name || "";
@@ -133,6 +145,7 @@ async function boot() {
   const tz = state.config.timezone;
   fmtTime = new Intl.DateTimeFormat(undefined, { timeZone: tz, hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
   fmtDay = new Intl.DateTimeFormat(undefined, { timeZone: tz, weekday: "short", month: "short", day: "numeric" });
+  fmtDate = new Intl.DateTimeFormat(undefined, { timeZone: tz, month: "short", day: "numeric", year: "numeric" });
   fmtDayTime = new Intl.DateTimeFormat(undefined, {
     timeZone: tz, month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23",
   });
@@ -149,7 +162,9 @@ async function start(user) {
   $("#login").hidden = true;
   $("#app").hidden = false;
   $("#agency").textContent = state.config.agency_name;
-  $("#demo-badge").hidden = !state.config.demo;
+  const badge = $("#demo-badge");
+  badge.textContent = state.config.demo ? "Synthetic demo data" : state.config.data_note || "";
+  badge.hidden = !badge.textContent;
   $("#user-name").textContent = user.display_name;
   $("#user-role").textContent = user.role;
   $("#view-as").hidden = !DEMO;
@@ -177,7 +192,8 @@ async function start(user) {
   if (state.shifts.length) {
     await loadShift(0);
   } else {
-    $("#tab-units").innerHTML = `<p class="empty">No shifts yet. Import AVL pings and assignments, or run <code>python -m beatline seed-demo</code>.</p>`;
+    $("#tab-units").innerHTML = `<p class="empty">No data yet. Start the Houston poller (<code>python -m beatline houston poll</code>),
+      import AVL pings and assignments, or run <code>python -m beatline seed-demo</code>.</p>`;
   }
 }
 
@@ -185,7 +201,10 @@ async function start(user) {
 
 function renderShiftOptions() {
   $("#shift-select").innerHTML = state.shifts
-    .map((s, i) => `<option value="${i}">${esc(fmtDay.format(new Date(s.start * 1000)))} · ${esc(s.name)} ${hhmm(s.start)}–${hhmm(s.end)} · ${plural(s.units, "unit")}</option>`)
+    .map((s, i) => {
+      const what = s.units ? plural(s.units, "unit") : plural(s.calls ?? 0, "call");
+      return `<option value="${i}">${esc(fmtDay.format(new Date(s.start * 1000)))} · ${esc(s.name)} ${hhmm(s.start)}–${hhmm(s.end)} · ${what}${s.in_progress ? " · live" : ""}</option>`;
+    })
     .join("");
 }
 
@@ -217,9 +236,48 @@ async function loadShift(index) {
   } finally {
     $("#panel").classList.remove("loading");
   }
+  clearInterval(refreshTimer);
+  if (state.shift.in_progress) refreshTimer = setInterval(refreshLive, 60_000);
+}
+
+// While the current shift is live, re-read it every minute (the poller adds calls every five).
+async function refreshLive() {
+  if (document.hidden || !state.shift?.in_progress) return;
+  const shifts = await api("/api/shifts");
+  if (shifts[0] && shifts[0].start !== state.shift.start) {
+    state.shifts = shifts;
+    renderShiftOptions();
+    return loadShift(0);  // the shift rolled over: follow the new live one
+  }
+  state.shifts = shifts;
+  renderShiftOptions();
+  state.shift = shifts[0];
+  $("#shift-select").value = "0";
+  const { start, end } = state.shift;
+  state.report = await api(`/api/report?start=${start}&end=${end}`);
+  renderAll();
+}
+
+function applyMode() {
+  const co = callsOnly();
+  const hasZones = state.zones.length > 0;
+  $("#tabs [data-tab=units]").hidden = co;
+  $("#tabs [data-tab=zones]").hidden = co && !hasZones;
+  $("#playback").hidden = co;
+  $('#layers [data-layer="trails"]').closest("label").hidden = co;
+  $('#layers [data-layer="zones"]').closest("label").hidden = !hasZones;
+  $('#layers [name=heat][value=patrol]').closest("label").hidden = co;
+  $("#heat-demand-label").textContent = state.report.demand?.source === "crime" ? "Reported crime (baseline)" : "Call demand (28 days)";
+  if (co && state.heat === "patrol") {
+    state.heat = "";
+    $('#layers [name=heat][value=""]').checked = true;
+  }
+  const current = $('#tabs [aria-selected="true"]');
+  if (!current || current.hidden) selectTab("beats");
 }
 
 function renderAll() {
+  applyMode();
   renderTiles();
   renderUnits();
   renderBeats();
@@ -234,10 +292,26 @@ function renderAll() {
 
 /* ---------- tiles ---------- */
 
+function callsOnlyTiles() {
+  const r = state.report;
+  const s = r.summary;
+  const hours = Math.max(0.25, (Math.min(r.window.end, Date.now() / 1000) - r.window.start) / 3600);
+  const busiest = [...r.beats].sort((a, b) => b.calls - a.calls)[0];
+  const live = state.shift.in_progress;
+  return [
+    { label: live ? "Calls so far" : "Calls this shift", value: s.calls,
+      sub: `${(s.calls / hours).toFixed(1)} per hour${live ? ` · updated ${hhmm(Date.now() / 1000)}` : ""}` },
+    { label: "Busiest beat", value: busiest?.calls ? busiest.beat_id : "—",
+      sub: busiest?.calls ? `${plural(busiest.calls, "call")}, ${busiest.expected_calls} expected` : "no calls yet" },
+    { label: "Beats busier than usual", value: s.beats_busier, sub: "vs. each beat's usual share" },
+    { label: "Calls not on the map", value: s.unmapped_calls, sub: "address could not be located" },
+  ];
+}
+
 function renderTiles() {
   const s = state.report.summary;
   const p1 = s.median_gps_response_s["1"];
-  const tiles = [
+  const tiles = callsOnly() ? callsOnlyTiles() : [
     { label: "Units tracked", value: s.units, sub: `${s.unit_hours} unit-hours of GPS` },
     { label: "City coverage", value: `${s.city_covered_pct}%`, sub: "of beat-time had a unit present" },
     { label: "Beats with 2h+ gap", value: s.beats_with_long_gap, sub: `${plural(s.beats_under_covered, "beat")} under-covered` },
@@ -311,6 +385,31 @@ const STATUS_TEXT = {
   over: "Over-covered",
   low_demand: "Low demand",
 };
+const CALL_STATUS = { busier: "▲ Busier than usual", quieter: "▼ Quieter than usual", typical: "Typical" };
+
+function callStatusLabel(b) {
+  return `<span class="status ${b.call_status}"><span class="dot" aria-hidden="true"></span>${CALL_STATUS[b.call_status]}</span>`;
+}
+
+function renderBeatsCallsOnly() {
+  const r = state.report;
+  const rows = [...r.beats].sort((a, b) => b.calls - a.calls || b.demand_share - a.demand_share);
+  const mapped = rows.reduce((n, b) => n + b.calls, 0);
+  $("#tab-beats").innerHTML = `
+    <p class="tab-intro">Calls this shift compared with each beat's usual share of demand, taken from ${esc(demandLabel(r.demand))}.
+      <em>Expected</em> is that share of this shift's ${plural(mapped, "mapped call")}. A beat is flagged only when the difference is too large to be chance.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Beat</th><th class="num">Calls</th><th class="num">Expected</th><th>Compared with usual</th></tr></thead>
+      <tbody>${rows.map((b) => `
+        <tr data-key="${esc(b.beat_id)}" tabindex="0" class="${b.beat_id === state.selectedBeat ? "selected" : ""}">
+          <td><strong>${esc(b.name)}</strong></td>
+          <td class="num">${b.calls}</td>
+          <td class="num">${b.expected_calls}</td>
+          <td>${callStatusLabel(b)}</td>
+        </tr>`).join("")}
+      </tbody>
+    </table></div>`;
+}
 
 function statusLabel(b) {
   const idx = b.coverage_index == null ? "" : ` ${b.coverage_index}×`;
@@ -318,9 +417,10 @@ function statusLabel(b) {
 }
 
 function renderBeats() {
+  if (callsOnly()) return renderBeatsCallsOnly();
   const th = state.config.thresholds;
   $("#tab-beats").innerHTML = `
-    <p class="tab-intro">Coverage index = share of this shift's patrol time ÷ share of the last 28 days of calls.
+    <p class="tab-intro">Coverage index = share of this shift's patrol time ÷ share of ${esc(demandLabel(state.report.demand))}.
       Below ${th.under_covered}× means the beat got far less patrol than its call volume suggests; above ${th.over_covered}× means far more.</p>
     <div class="table-wrap"><table>
       <thead><tr>
@@ -371,10 +471,47 @@ rowKeys($("#tab-zones"), (id) => {
   if (z) map.flyTo([z.lat, z.lon], 16, { duration: 0.6 });
 });
 
+function unmappedList() {
+  const rows = state.report.unmapped_calls || [];
+  if (!rows.length) return "";
+  return `
+    <h3 class="subhead">Not on the map (${rows.length})</h3>
+    <p class="tab-intro">The geocoder could not place these addresses, often because the address is an intersection or has no house number. They are not included in the call counts above.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Time</th><th>Call</th><th>Address as published</th></tr></thead>
+      <tbody>${[...rows].reverse().map((c) => `
+        <tr><td>${hhmm(c.ts)}</td><td>${esc(c.call_type)}</td><td class="unit-name">${esc(c.address)}</td></tr>`).join("")}
+      </tbody>
+    </table></div>`;
+}
+
+function isActive(c) {
+  return Boolean(state.shift?.in_progress && c.cleared_ts && c.cleared_ts >= Date.now() / 1000 - 600);
+}
+
 function renderCalls() {
   const calls = state.report.calls;
   if (!calls.length) {
-    $("#tab-calls").innerHTML = `<p class="empty">No calls in this window.</p>`;
+    $("#tab-calls").innerHTML = `<p class="empty">No calls in this window.</p>${callsOnly() ? unmappedList() : ""}`;
+    return;
+  }
+  if (callsOnly()) {
+    const fromHec = calls.some((c) => c.source === "hec");
+    $("#tab-calls").innerHTML = `
+      <p class="tab-intro">${fromHec ? "Police calls from the city's Active Incidents list, captured every 5 minutes. Addresses are as published; priority is not published." : "Calls for service in this window."}
+        <em>Listed until</em> is the last time the call was still open.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Time</th><th>Call</th><th>Address</th><th>Beat</th><th class="num">Listed until</th></tr></thead>
+        <tbody>${[...calls].reverse().map((c) => `
+          <tr data-key="${esc(c.id)}" tabindex="0">
+            <td>${hhmm(c.ts)}</td>
+            <td>${esc(c.call_type)}${c.priority ? ` <span class="muted">P${c.priority}</span>` : ""}</td>
+            <td class="unit-name">${esc(c.address || "—")}</td>
+            <td>${esc(c.beat_id || "—")}</td>
+            <td class="num">${isActive(c) ? "Open" : c.cleared_ts ? hhmm(c.cleared_ts) : "—"}</td>
+          </tr>`).join("")}
+        </tbody>
+      </table></div>${unmappedList()}`;
     return;
   }
   $("#tab-calls").innerHTML = `
@@ -384,7 +521,7 @@ function renderCalls() {
       <tbody>${calls.map((c) => `
         <tr data-key="${esc(c.id)}" tabindex="0">
           <td>${hhmm(c.ts)}</td>
-          <td>${esc(c.call_type)} <span class="muted">P${c.priority}</span></td>
+          <td>${esc(c.call_type)}${c.priority ? ` <span class="muted">P${c.priority}</span>` : ""}</td>
           <td>${esc(c.beat_id || "—")}</td>
           <td>${c.officer_id ? esc(officerLabel(c.officer_id)) : '<span class="muted">—</span>'}</td>
           <td class="num">${seconds(c.gps_response_s)}</td>
@@ -431,6 +568,7 @@ function initMap() {
     return;
   }
   map = L.map("map", { zoomControl: true, attributionControl: true });
+  map.on("zoomend", updateLabels);
   const pane = (name, z) => {
     map.createPane(name);
     map.getPane(name).style.zIndex = z;
@@ -467,10 +605,16 @@ function setTiles() {
   }).addTo(map);
 }
 
+// Beat labels: always for a small city; for a big one (Houston has 100+ beats) only when zoomed in.
+function updateLabels() {
+  const show = $('#layers [data-layer="beats"]').checked && (state.beats.length <= 30 || map.getZoom() >= 12);
+  if (show) groups.labels.addTo(map); else groups.labels.remove();
+}
+
 $$("#layers [data-layer]").forEach((box) => box.addEventListener("change", () => {
   const g = groups[box.dataset.layer];
   if (box.checked) g.addTo(map); else g.remove();
-  if (box.dataset.layer === "beats") (box.checked ? groups.labels.addTo(map) : groups.labels.remove());
+  if (box.dataset.layer === "beats") updateLabels();
   if (box.dataset.layer === "trails") (box.checked ? groups.units.addTo(map) : groups.units.remove());
 }));
 $$("#layers [name=heat]").forEach((r) => r.addEventListener("change", () => {
@@ -480,39 +624,52 @@ $$("#layers [name=heat]").forEach((r) => r.addEventListener("change", () => {
 }));
 
 function beatColor(status) {
-  if (status === "under" || status === "uncovered") return cssVar("--div-under");
-  if (status === "over") return cssVar("--div-over");
+  if (status === "under" || status === "uncovered" || status === "busier") return cssVar("--div-under");
+  if (status === "over" || status === "quieter") return cssVar("--div-over");
   return cssVar("--div-mid");
+}
+
+function beatLatLngs(beat) {
+  return (beat.rings || [beat.ring]).map((ring) => [ring.map(([lon, lat]) => [lat, lon])]);
 }
 
 function drawBeats() {
   groups.beats.clearLayers();
   groups.labels.clearLayers();
+  const co = callsOnly();
   const byId = Object.fromEntries(state.report.beats.map((b) => [b.beat_id, b]));
-  const fill = { uncovered: 0.34, under: 0.24, over: 0.18, balanced: 0.1, low_demand: 0.1 };
+  const fill = co
+    ? { busier: 0.32, quieter: 0.16, typical: 0.06 }
+    : { uncovered: 0.34, under: 0.24, over: 0.18, balanced: 0.1, low_demand: 0.1 };
   for (const beat of state.beats) {
     const r = byId[beat.id];
-    const latlngs = beat.ring.map(([lon, lat]) => [lat, lon]);
-    const color = beatColor(r?.status);
+    const status = r && (co ? r.call_status : r.status);
+    const color = beatColor(status);
     const selected = beat.id === state.selectedBeat;
-    const poly = L.polygon(latlngs, {
-      renderer: renderers.beats, color: selected ? cssVar("--text") : color, weight: selected ? 3 : 1.5,
-      opacity: 0.9, fillColor: color, fillOpacity: state.heat ? 0 : r ? fill[r.status] : 0.05,
+    const poly = L.polygon(beatLatLngs(beat), {
+      renderer: renderers.beats, color: selected ? cssVar("--text") : color, weight: selected ? 3 : co ? 1 : 1.5,
+      opacity: 0.9, fillColor: color, fillOpacity: state.heat ? 0 : r ? fill[status] : 0.05,
     });
-    if (r) {
+    if (r && co) {
+      poly.bindTooltip(`<strong>${esc(r.name)}</strong><br>${CALL_STATUS[r.call_status]}<br>
+        ${plural(r.calls, "call")} this shift · ${r.expected_calls} expected<br>
+        ${(r.demand_share * 100).toFixed(1)}% of ${esc(demandLabel(state.report.demand))}`, { sticky: true });
+    } else if (r) {
       poly.bindTooltip(`<strong>${esc(r.name)}</strong><br>${STATUS_TEXT[r.status]}${r.coverage_index != null ? ` (${r.coverage_index}×)` : ""}<br>
         Unit present ${Math.round(r.covered_pct)}% of shift · longest gap ${duration(r.longest_gap_minutes)}<br>
-        ${r.calls} calls this shift · ${Math.round(r.demand_share * 100)}% of 28-day calls`, { sticky: true });
+        ${r.calls} calls this shift · ${Math.round(r.demand_share * 100)}% of baseline demand`, { sticky: true });
     }
     poly.on("click", () => selectBeat(state.selectedBeat === beat.id ? null : beat.id, false));
     poly.addTo(groups.beats);
-    const center = poly.getBounds().getCenter();
-    const sub = r ? `${STATUS_TEXT[r.status]}${r.long_gap ? " · ⚠ gap" : ""}` : "";
+    const center = L.polygon(beat.ring.map(([lon, lat]) => [lat, lon])).getBounds().getCenter();
+    const sub = !r ? "" : co ? plural(r.calls, "call") : `${STATUS_TEXT[r.status]}${r.long_gap ? " · ⚠ gap" : ""}`;
+    const title = co ? beat.id : beat.name;
     L.marker(center, {
       interactive: false,
-      icon: L.divIcon({ className: "", html: `<span class="beat-label">${esc(beat.name)}<br><small>${esc(sub)}</small></span>`, iconSize: null }),
+      icon: L.divIcon({ className: "", html: `<span class="beat-label">${esc(title)}<br><small>${esc(sub)}</small></span>`, iconSize: null }),
     }).addTo(groups.labels);
   }
+  updateLabels();
 }
 
 function splitTrail(points) {
@@ -552,13 +709,19 @@ function drawTrails() {
 function drawCalls() {
   groups.calls.clearLayers();
   const color = cssVar("--series-2");
+  const co = callsOnly();
   for (const c of state.report.calls) {
+    const strong = co ? isActive(c) : c.priority === 1;
     const m = L.circleMarker([c.lat, c.lon], {
-      renderer: renderers.calls, callId: c.id, radius: c.priority === 1 ? 7 : 5,
-      color, weight: 2, fillColor: color, fillOpacity: c.priority === 1 ? 0.9 : 0.3,
+      renderer: renderers.calls, callId: c.id, radius: strong ? 7 : 5,
+      color, weight: 2, fillColor: color, fillOpacity: strong ? 0.9 : 0.3,
     });
-    m.bindTooltip(`<strong>${esc(c.call_type)}</strong> · P${c.priority}<br>${hhmm(c.ts)}${c.cleared_ts ? `–${hhmm(c.cleared_ts)}` : ""} · ${esc(c.beat_id || "outside beats")}<br>
-      ${c.officer_id ? `Unit ${esc(officerLabel(c.officer_id))} · on scene in ${seconds(c.gps_response_s)}` : "No unit recorded"}`);
+    const when = co && isActive(c) ? `${hhmm(c.ts)}, still open` : `${hhmm(c.ts)}${c.cleared_ts ? `–${hhmm(c.cleared_ts)}` : ""}`;
+    const who = c.officer_id
+      ? `<br>Unit ${esc(officerLabel(c.officer_id))} · on scene in ${seconds(c.gps_response_s)}`
+      : co ? "" : "<br>No unit recorded";
+    m.bindTooltip(`<strong>${esc(c.call_type)}</strong>${c.priority ? ` · P${c.priority}` : ""}<br>${when} · ${esc(c.beat_id || "outside beats")}
+      ${c.address ? `<br>${esc(c.address)}` : ""}${who}`);
     m.addTo(groups.calls);
   }
 }
@@ -594,14 +757,17 @@ async function loadHeat() {
     const f = data.max ? cell.v / data.max : 0;
     const bin = BINS.findIndex((b) => f < b);
     const color = ramp[bin === -1 ? ramp.length - 1 : bin];
-    const unit = data.layer === "patrol" ? `${duration(cell.v)} of unit presence` : `${cell.v} calls in 28 days`;
+    const crime = data.demand?.source === "crime";
+    const unit = data.layer === "patrol" ? `${duration(cell.v)} of unit presence` : crime ? `${cell.v} reported crimes` : `${cell.v} calls in 28 days`;
     L.rectangle(cell.b, { renderer: renderers.heat, stroke: false, fillColor: color, fillOpacity: 0.6 })
       .bindTooltip(unit, { sticky: true })
       .addTo(groups.heat);
   }
-  const maxText = data.layer === "patrol" ? duration(data.max) : `${data.max} calls`;
+  const crimeLegend = data.demand?.source === "crime";
+  const maxText = data.layer === "patrol" ? duration(data.max) : `${data.max} ${crimeLegend ? "crimes" : "calls"}`;
+  const what = data.layer === "patrol" ? "Unit-minutes" : crimeLegend ? "Reported crimes" : "Calls";
   $("#legend").innerHTML = `
-    <div>${data.layer === "patrol" ? "Unit-minutes" : "Calls"} per ${data.cell_m} m cell</div>
+    <div>${what} per ${data.cell_m} m cell</div>
     <div class="ramp">${ramp.map((c) => `<span style="background:${c}"></span>`).join("")}</div>
     <div class="ends"><span>Low</span><span>${esc(maxText)}</span></div>`;
 }
@@ -625,7 +791,7 @@ function selectBeat(id, fromTable) {
   drawBeats();
   renderBeats();
   const beat = state.beats.find((b) => b.id === id);
-  if (beat && fromTable) map.flyToBounds(L.latLngBounds(beat.ring.map(([lon, lat]) => [lat, lon])), { padding: [40, 40], duration: 0.6 });
+  if (beat && fromTable) map.flyToBounds(L.polygon(beatLatLngs(beat)).getBounds(), { padding: [40, 40], duration: 0.6 });
   if (!fromTable && id) selectTab("beats");
 }
 

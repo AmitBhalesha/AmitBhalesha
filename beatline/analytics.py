@@ -4,6 +4,7 @@
 * Which beats went the longest with nobody in them?
 * Does patrol time line up with where calls actually come from?
 * Did directed-patrol hot spots get the minutes they were supposed to?
+* Without GPS (public data only): which beats are busier than usual?
 
 Presence is measured from consecutive pings: the time between two pings is
 credited to the location of the first one. Gaps longer than MAX_GAP_S (radio
@@ -13,10 +14,14 @@ dead zone, device off) are not credited to anywhere.
 from __future__ import annotations
 
 import bisect
+import json
+import math
 import sqlite3
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from . import db
 from .geo import BeatIndex, Grid, haversine_m
@@ -25,7 +30,10 @@ MAX_GAP_S = 300
 STATIONARY_MPS = 0.9            # ~2 mph; slower than this counts as stationary
 ARRIVAL_RADIUS_M = 100          # unit within this distance of a call = on scene
 ARRIVAL_SEARCH_S = 3600
-DEMAND_LOOKBACK_S = 28 * 86400
+DEMAND_LOOKBACK_S = 28 * 86400     # baseline from calls: the 28 days before the window
+CRIME_LOOKBACK_S = 90 * 86400      # baseline from crime reports: the latest 90 days on file
+BUSY_Z = 2.5                       # calls vs. baseline: how unusual before a beat is flagged
+DEFAULT_SHIFTS = [["Days", 6], ["Evenings", 14], ["Nights", 22]]
 UNDER_COVERED = 0.5             # coverage index thresholds
 OVER_COVERED = 2.0
 LONG_GAP_S = 2 * 3600
@@ -119,7 +127,7 @@ def calls_in_window(
     conn: sqlite3.Connection, start: int, end: int, index: BeatIndex | None = None
 ) -> list[dict]:
     if index is None:
-        index = BeatIndex({b["id"]: b["ring"] for b in db.load_beats(conn).values()})
+        index = BeatIndex({b["id"]: b["rings"] for b in db.load_beats(conn).values()})
     rows = conn.execute(
         "SELECT * FROM calls WHERE ts >= ? AND ts < ? ORDER BY ts", (start, end)
     ).fetchall()
@@ -129,6 +137,64 @@ def calls_in_window(
         call["beat_id"] = index.locate(r["lat"], r["lon"])
         out.append(call)
     return out
+
+
+def demand_points(conn: sqlite3.Connection, end: int) -> tuple[list[tuple], dict]:
+    """Where demand usually comes from, as (beat_id, lat, lon, weight) rows plus a
+    description of the source. Uses reported crimes when the database is set up
+    for them (meta demand_source=crime) and has any; otherwise the 28 days of
+    calls before `end`."""
+    if db.get_meta(conn, "demand_source") == "crime":
+        latest = conn.execute("SELECT MAX(ts) FROM crime_reports").fetchone()[0]
+        if latest is not None:
+            hi = min(end, latest + 1)
+            lo = hi - CRIME_LOOKBACK_S
+            rows = conn.execute(
+                "SELECT beat_id, lat, lon, offense_count FROM crime_reports WHERE ts >= ? AND ts < ?", (lo, hi)
+            ).fetchall()
+            points = [(r["beat_id"], r["lat"], r["lon"], r["offense_count"]) for r in rows]
+            return points, {"source": "crime", "start": lo, "end": hi, "count": sum(p[3] for p in points)}
+    lo = end - DEMAND_LOOKBACK_S
+    rows = conn.execute("SELECT lat, lon FROM calls WHERE ts >= ? AND ts < ?", (lo, end)).fetchall()
+    return [(None, r["lat"], r["lon"], 1) for r in rows], {"source": "calls", "start": lo, "end": end, "count": len(rows)}
+
+
+def call_status(calls: int, expected: float) -> tuple[float | None, str]:
+    """Compare a beat's calls with what its baseline share predicts. Call counts
+    are roughly Poisson, so (calls - expected) / sqrt(expected) is a z-score."""
+    if expected <= 0:
+        return None, "busier" if calls >= 3 else "typical"
+    z = (calls - expected) / math.sqrt(expected)
+    if z >= BUSY_Z:
+        return round(z, 1), "busier"
+    if z <= -BUSY_Z:
+        return round(z, 1), "quieter"
+    return round(z, 1), "typical"
+
+
+def call_windows(conn: sqlite3.Connection, tz_name: str, now: int, limit: int = 60) -> list[dict]:
+    """Shift-shaped windows when there are no rosters (public data only): one
+    per shift from the first recorded call until now, newest first."""
+    first = conn.execute("SELECT MIN(ts) FROM calls").fetchone()[0]
+    if first is None:
+        return []
+    tz = ZoneInfo(tz_name)
+    shifts = json.loads(db.get_meta(conn, "shift_starts") or "null") or DEFAULT_SHIFTS
+    day = datetime.fromtimestamp(first, tz).date() - timedelta(days=1)
+    last_day = datetime.fromtimestamp(now, tz).date() + timedelta(days=1)
+    bounds = []
+    while day <= last_day:
+        bounds += [(name, int(datetime(day.year, day.month, day.day, hour, tzinfo=tz).timestamp()))
+                   for name, hour in shifts]
+        day += timedelta(days=1)
+    windows = []
+    for (name, start), (_, end) in zip(bounds, bounds[1:]):
+        if start > now or end <= first:
+            continue
+        n = conn.execute("SELECT COUNT(*) FROM calls WHERE ts >= ? AND ts < ?", (start, end)).fetchone()[0]
+        windows.append({"name": name, "start": start, "end": end, "units": 0, "calls": n,
+                        "in_progress": start <= now < end})
+    return windows[::-1][:limit]
 
 
 def first_arrival(pings: list, call: dict) -> int | None:
@@ -179,7 +245,7 @@ def shift_report(
     coverage picture stays truthful, but they contain no per-officer detail.
     """
     beats = db.load_beats(conn)
-    index = BeatIndex({b["id"]: b["ring"] for b in beats.values()})
+    index = BeatIndex({b["id"]: b["rings"] for b in beats.values()})
     zones = db.load_zones(conn)
     officers = db.load_officers(conn)
     assignments = assignments_in_window(conn, start, end)
@@ -236,12 +302,15 @@ def shift_report(
             if arrival is not None:
                 response_by_priority[c["priority"]].append(arrival)
 
-    demand = calls_in_window(conn, end - DEMAND_LOOKBACK_S, end, index)
+    points, demand_info = demand_points(conn, end)
     demand_by_beat: dict[str, int] = defaultdict(int)
-    for c in demand:
-        if c["beat_id"]:
-            demand_by_beat[c["beat_id"]] += 1
+    for beat_id, lat, lon, weight in points:
+        if beat_id not in beats:
+            beat_id = index.locate(lat, lon) if lat is not None else None
+        if beat_id:
+            demand_by_beat[beat_id] += weight
     total_demand = sum(demand_by_beat.values())
+    calls_in_beats = sum(calls_by_beat.values())
     total_patrol = sum(sum(e - s for s, e in merge_intervals(iv)) for iv in beat_intervals.values())
     total_patrol_unit_s = sum(sum(a.beat_s.values()) for a in acc.values())
 
@@ -253,6 +322,8 @@ def shift_report(
         demand_share = demand_by_beat[beat_id] / total_demand if total_demand else 0.0
         cov_index = round(patrol_share / demand_share, 2) if demand_share else None
         gap_s, gap_start, gap_end = longest_gap(beat_intervals[beat_id], start, end)
+        expected = demand_share * calls_in_beats
+        z, busy = call_status(calls_by_beat[beat_id], expected)
         beat_rows.append({
             "beat_id": beat_id,
             "name": beat["name"],
@@ -262,7 +333,10 @@ def shift_report(
             "units_present": len(beat_officers[beat_id]),
             "assigned_units": sorted(o for o, a in assignments.items() if a["beat_id"] == beat_id),
             "calls": calls_by_beat[beat_id],
-            "calls_28d": demand_by_beat[beat_id],
+            "expected_calls": round(expected, 1),
+            "call_z": z,
+            "call_status": busy,
+            "demand_count": demand_by_beat[beat_id],
             "patrol_share": round(patrol_share, 3),
             "demand_share": round(demand_share, 3),
             "coverage_index": cov_index,
@@ -318,12 +392,23 @@ def shift_report(
         visible = set(officer_filter)
         calls = [c for c in calls if c["officer_id"] in visible]
 
+    unmapped_rows = [dict(r) for r in conn.execute(
+        "SELECT id, ts, call_type, address, last_seen FROM unmapped_calls WHERE ts >= ? AND ts < ? ORDER BY ts",
+        (start, end),
+    )]
+    unmapped = len(unmapped_rows)
     return {
         "window": {"start": start, "end": end},
+        # "calls_only" when there is no GPS for this window (public data): the
+        # dashboard then compares calls with the baseline instead of patrol time.
+        "mode": "avl" if pings or assignments else "calls_only",
+        "demand": demand_info,
         "summary": {
             "units": len(officer_ids),
             "unit_hours": round(sum(a.tracked_s for o, a in acc.items() if o in officer_ids) / 3600, 1),
             "calls": len(calls),
+            "unmapped_calls": unmapped,
+            "beats_busier": sum(1 for b in beat_rows if b["call_status"] == "busier"),
             "beats_with_long_gap": sum(1 for b in beat_rows if b["long_gap"]),
             "beats_under_covered": sum(1 for b in beat_rows if b["status"] in ("under", "uncovered")),
             "median_gps_response_s": {
@@ -332,10 +417,12 @@ def shift_report(
             "city_covered_pct": round(100 * total_patrol / ((end - start) * len(beats)), 1) if beats else 0,
         },
         "officers": officer_rows,
+        "unmapped_calls": unmapped_rows if officer_filter is None else [],
         "beats": beat_rows,
         "zones": zone_rows,
         "calls": [
-            {k: c[k] for k in ("id", "ts", "cleared_ts", "call_type", "priority", "lat", "lon", "officer_id", "beat_id")}
+            {k: c.get(k) for k in ("id", "ts", "cleared_ts", "call_type", "priority", "lat", "lon", "officer_id",
+                                   "beat_id", "address", "source")}
             | {"gps_response_s": c.get("gps_response_s")}
             for c in calls
         ],
@@ -367,21 +454,23 @@ def heat_grid(
     officer_filter: list[str] | None = None,
 ) -> dict:
     """layer='patrol': unit-minutes per cell in [start, end].
-    layer='calls': calls per cell over the 28 days ending at `end` (demand)."""
+    layer='calls': the demand baseline per cell (see demand_points)."""
     beats = db.load_beats(conn)
     ref_lat = next(iter(beats.values()))["ring"][0][1] if beats else 0.0
     grid = Grid(cell_m, ref_lat)
     values: dict[tuple[int, int], float] = defaultdict(float)
+    demand_info = None
     if layer == "patrol":
         for officer_id, rows in load_pings(conn, start, end, officer_filter).items():
             for seg in iter_segments(officer_id, rows, start, end):
                 values[grid.cell(seg.lat, seg.lon)] += seg.seconds / 60
     elif layer == "calls":
-        for r in conn.execute(
-            "SELECT lat, lon FROM calls WHERE ts >= ? AND ts < ?", (end - DEMAND_LOOKBACK_S, end)
-        ):
-            values[grid.cell(r["lat"], r["lon"])] += 1
+        points, demand_info = demand_points(conn, end)
+        for _, lat, lon, weight in points:
+            if lat is not None:
+                values[grid.cell(lat, lon)] += weight
     else:
         raise ValueError(f"unknown layer {layer!r}")
     cells = [{"b": grid.bounds(c), "v": round(v, 1)} for c, v in values.items() if v > 0]
-    return {"layer": layer, "cell_m": cell_m, "max": max((c["v"] for c in cells), default=0), "cells": cells}
+    return {"layer": layer, "cell_m": cell_m, "max": max((c["v"] for c in cells), default=0), "cells": cells,
+            "demand": demand_info}
